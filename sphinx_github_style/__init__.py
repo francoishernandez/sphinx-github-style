@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sys
 import sphinx
 import inspect
@@ -5,8 +6,17 @@ import subprocess
 from pathlib import Path
 from functools import cached_property
 from sphinx.application import Sphinx
-from sphinx.errors import ExtensionError
-from typing import Dict, Any, Optional, Callable
+from sphinx.errors import ExtensionError, SphinxError
+from typing import Dict, Any, Optional, Callable, TYPE_CHECKING
+from docutils import nodes
+from sphinx import addnodes
+from sphinx.locale import _
+
+
+if TYPE_CHECKING:
+    from docutils.nodes import Node
+    from sphinx.application import Sphinx
+
 
 __version__ = "1.2.0"
 __author__ = 'Adam Korn <hello@dailykitten.net>'
@@ -14,6 +24,61 @@ __author__ = 'Adam Korn <hello@dailykitten.net>'
 from .add_linkcode_class import add_linkcode_node_class
 from .github_style import GitHubStyle
 from .lexer import GitHubLexer
+
+class LinkcodeError(SphinxError):
+    category = "linkcode error"
+
+
+def doctree_read(app: Sphinx, doctree: Node) -> None:
+    env = app.builder.env
+
+    resolve_target = getattr(env.config, 'linkcode_resolve', None)
+    if not callable(env.config.linkcode_resolve):
+        msg = 'Function `linkcode_resolve` is not given in conf.py'
+        raise LinkcodeError(msg)
+    assert resolve_target is not None  # for mypy
+
+    domain_keys = {
+        'py': ['module', 'fullname'],
+        'c': ['names'],
+        'cpp': ['names'],
+        'js': ['object', 'fullname'],
+    }
+
+    for objnode in list(doctree.findall(addnodes.desc)):
+        domain = objnode.get('domain')
+        uris: set[str] = set()
+        for signode in objnode:
+            if not isinstance(signode, addnodes.desc_signature):
+                continue
+
+            # Convert signode to a specified format
+            info = {}
+            for key in domain_keys.get(domain, []):
+                value = signode.get(key)
+                if not value:
+                    value = ''
+                info[key] = value
+            if not info:
+                continue
+
+            # Call user code to resolve the link
+            uri = resolve_target(domain, info)
+            if not uri:
+                # no source
+                continue
+
+            if uri in uris or not uri:
+                # only one link per name, please
+                continue
+            uris.add(uri)
+
+            inline = nodes.inline('', _('[source]'), classes=['viewcode-link'])
+            # this does not work for markdown builder
+            # onlynode = addnodes.only(expr='html')
+            # onlynode += nodes.reference('', '', inline, internal=False, refuri=uri)
+            onlynode = nodes.reference('', '', inline, internal=False, refuri=uri)
+            signode += onlynode
 
 
 def setup(app: Sphinx) -> Dict[str, Any]:
@@ -39,7 +104,10 @@ def setup(app: Sphinx) -> Dict[str, Any]:
 
     app.setup_extension('sphinx_github_style.add_linkcode_class')
     app.setup_extension('sphinx_github_style.github_style')
-    app.setup_extension('sphinx.ext.linkcode')
+    # app.setup_extension('sphinx.ext.linkcode')
+    # app.setup_extension('sphinx.ext.custom_linkcode')
+    app.connect('doctree-read', doctree_read)
+    app.add_config_value('linkcode_resolve', None, '')
     app.add_lexer('python', GitHubLexer)
 
     return {'version': sphinx.__display_version__, 'parallel_read_safe': True}
